@@ -4,6 +4,9 @@ package models
 
 type Linescore struct {
 
+	GamePk int `json:"gamePk"` // Not supplied by API, but useful for internal tracking
+	CreatedAt int `json:"appeared"` // Not supplied by API, but useful for internal tracking
+
 	Copyright string `json:"copyright"`
 
 	CurrentInning int `json:"currentInning"`

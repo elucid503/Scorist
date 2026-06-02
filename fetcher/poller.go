@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"paul/scorist/models"
 	"paul/scorist/utils"
+	"slices"
 	"time"
 )
 
@@ -11,17 +12,11 @@ type Poller struct {
 
 	Interval int
 
-	CurrentSchedule models.Schedule
-	Games *Games
+	Schedule models.Schedule
+	Games []models.Linescore // in-progress games, updated as they are polled
 
 }
 
-type Games struct {
-
-	Ongoing map[int]models.Linescore
-	Final map[int]models.Linescore
-
-}
 
 // Constructor
 
@@ -31,14 +26,8 @@ func NewPoller(interval int) *Poller {
 
 		Interval: interval,
 
-		CurrentSchedule: models.Schedule{},
-
-		Games: &Games{
-
-			Ongoing: make(map[int]models.Linescore),
-			Final: make(map[int]models.Linescore),
-
-		},
+		Schedule: models.Schedule{},
+		Games: make([]models.Linescore, 0),
 
 	}
 
@@ -62,11 +51,6 @@ func (p *Poller) Start() {
 
 		}
 
-		// DEBUG
-
-		fmt.Printf("Ongoing games: %d, Final games: %d\n", len(p.Games.Ongoing), len(p.Games.Final))
-		fmt.Printf("Linescores: %d ongoing, %d final\n", len(p.Games.Ongoing), len(p.Games.Final))
-
 	}
 
 }
@@ -75,7 +59,7 @@ func (p *Poller) Poll() error {
 
 	// First we must get the schedule for the current day if needed
 
-	if len(p.CurrentSchedule.Dates) == 0 || p.CurrentSchedule.Dates[0].Date != time.Now().Format("2006-01-02") {
+	if len(p.Schedule.Dates) == 0 || p.Schedule.Dates[0].Date != time.Now().Format("2006-01-02") {
 
 		_, err := p.getSchedule()
 
@@ -93,47 +77,43 @@ func (p *Poller) Poll() error {
 
 func (p *Poller) Update() error {
 
-	for _, date := range p.CurrentSchedule.Dates {
+	// For each game in the schedule, if it's in progress, we want to fetch its linescore and update our games slice
+
+	for _, date := range p.Schedule.Dates {
 
 		for _, game := range date.Games {
 
-			currentState := game.Status.DetailedState
+			if game.Status.DetailedState == "In Progress" {
 
-			fmt.Printf("Game %d is currently %s\n", game.GamePk, currentState)
+				linescore, err := p.getLinescore(game.GamePk)
 
-			switch currentState {
+				if err != nil {
 
-				case "In Progress":
+					fmt.Printf("Error fetching linescore for game %d: %v\n", game.GamePk, err)
 
-					// we must always get the linescore for in progress games, as they are always changing
+					continue
 
-					linescore, err := p.getLinescore(game.GamePk)
+				}
 
-					if err != nil {
+				if slices.ContainsFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == game.GamePk }) {
 
-						return err
+					// update it
 
-					}
+					index := slices.IndexFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == game.GamePk })
 
-					p.Games.Ongoing[game.GamePk] = linescore // replace the linescore for this game
+					p.Games[index] = linescore
 
-				case "Final":
+					fmt.Printf("Updated game %d in games slice\n", game.GamePk)
 
-					// we only need to get the linescore for final games if we haven't already gotten it, as it won't change
+				} else {
 
-					if _, ok := p.Games.Final[game.GamePk]; !ok {
+					// add it
 
-						linescore, err := p.getLinescore(game.GamePk)
+					p.Games = append(p.Games, linescore)
 
-						if err != nil {
+					fmt.Printf("Added game %d to games slice\n", game.GamePk)
 
-							return err
-
-						}
-
-						p.Games.Final[game.GamePk] = linescore
-
-					}
+				}
 
 			}
 
@@ -141,7 +121,31 @@ func (p *Poller) Update() error {
 
 	}
 
+	p.Clean()
+
 	return nil
+
+}
+
+func (p *Poller) Clean() {
+
+	// remove games > 24 hrs old
+
+	for i := len(p.Games) - 1; i >= 0; i-- {
+
+		game := p.Games[i]
+
+		if time.Now().Unix() - int64(game.CreatedAt) > 24 * 60 * 60 {
+
+			// remove it
+
+			p.Games = append(p.Games[:i], p.Games[i+1:]...) // removes at index i
+
+			fmt.Printf("Removed game %d from games slice (timed out)\n", game.GamePk)
+
+		}
+
+	}
 
 }
 
@@ -163,7 +167,7 @@ func (p *Poller) getSchedule() (*models.Schedule, error) {
 
 	}
 
-	p.CurrentSchedule = schedule
+	p.Schedule = schedule
 
 	return &schedule, nil
 
@@ -174,6 +178,9 @@ func (p *Poller) getLinescore(gamePk int) (models.Linescore, error) {
 	var linescore models.Linescore
 
 	err := utils.GetAndDecode(fmt.Sprintf("https://statsapi.mlb.com/api/v1/game/%d/linescore", gamePk), &linescore)
+
+	linescore.GamePk = gamePk // API doesn't include this, but we want it for internal tracking
+	linescore.CreatedAt = int(time.Now().Unix()) // also add a timestamp for when we fetched this
 
 	fmt.Printf("Fetched linescore for game %d: %d-%d\n", gamePk, linescore.Teams.Home.Runs, linescore.Teams.Away.Runs)
 
