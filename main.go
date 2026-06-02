@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"paul/scorist/discord"
+	"paul/scorist/fetcher"
 
 	"github.com/joho/godotenv"
 )
@@ -30,6 +31,10 @@ func main() {
 
 	discord.RegisterEvents()
 	discord.CreateCommands()
+
+	poller := fetcher.NewPoller(30) // 30s interval
+
+	go poller.Start() // starts as a goroutine
 
 	select {} // block forever
 

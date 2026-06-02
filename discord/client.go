@@ -8,19 +8,22 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/gateway"
 )
 
 var Client *bot.Client
 
 func Init(token string) error {
 
-	client, err := disgo.New(token)
+	client, err := disgo.New(token, bot.WithGatewayConfigOpts(gateway.WithIntents(gateway.IntentsNonPrivileged)))
 
 	if err != nil {
 
 		return err
 
 	}
+
+	Client = client
 
 	return client.OpenGateway(context.Background())
 

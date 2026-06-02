@@ -46,6 +46,8 @@ func NewPoller(interval int) *Poller {
 
 func (p *Poller) Start() {
 
+	p.Poll() // initial poll to populate our data immediately
+
 	ticker := time.NewTicker(time.Duration(p.Interval) * time.Second)
 
 	for range ticker.C {
@@ -60,6 +62,11 @@ func (p *Poller) Start() {
 
 		}
 
+		// DEBUG
+
+		fmt.Printf("Ongoing games: %d, Final games: %d\n", len(p.Games.Ongoing), len(p.Games.Final))
+		fmt.Printf("Linescores: %d ongoing, %d final\n", len(p.Games.Ongoing), len(p.Games.Final))
+
 	}
 
 }
@@ -68,7 +75,7 @@ func (p *Poller) Poll() error {
 
 	// First we must get the schedule for the current day if needed
 
-	if p.CurrentSchedule.Dates[0].Date != time.Now().Format("2006-01-02") {
+	if len(p.CurrentSchedule.Dates) == 0 || p.CurrentSchedule.Dates[0].Date != time.Now().Format("2006-01-02") {
 
 		_, err := p.getSchedule()
 
@@ -91,6 +98,8 @@ func (p *Poller) Update() error {
 		for _, game := range date.Games {
 
 			currentState := game.Status.DetailedState
+
+			fmt.Printf("Game %d is currently %s\n", game.GamePk, currentState)
 
 			switch currentState {
 
@@ -142,6 +151,8 @@ func (p *Poller) getSchedule() (*models.Schedule, error) {
 
 	day := time.Now().Format("2006-01-02") // MLB API expects date in YYYY-MM-DD format
 
+	fmt.Printf("Fetching schedule for %s\n", day)
+
 	var schedule models.Schedule
 
 	err := utils.GetAndDecode(fmt.Sprintf("https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=%s", day), &schedule)
@@ -163,6 +174,8 @@ func (p *Poller) getLinescore(gamePk int) (models.Linescore, error) {
 	var linescore models.Linescore
 
 	err := utils.GetAndDecode(fmt.Sprintf("https://statsapi.mlb.com/api/v1/game/%d/linescore", gamePk), &linescore)
+
+	fmt.Printf("Fetched linescore for game %d: %d-%d\n", gamePk, linescore.Teams.Home.Runs, linescore.Teams.Away.Runs)
 
 	return linescore, err
 
