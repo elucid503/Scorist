@@ -84,7 +84,7 @@ type GameStatus struct {
 
 	AbstractGameState string `json:"abstractGameState"`
 	CodedGameState string `json:"codedGameState"`
-	DetailedState string `json:"detailedState"`
+	DetailedState string `json:"detailedState"` // e.g. 'Scheduled', 'In Progress', 'Final', etc.
 
 	StatusCode string `json:"statusCode"`
 	AbstractGameCode  string `json:"abstractGameCode"`
