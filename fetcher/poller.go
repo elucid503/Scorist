@@ -8,19 +8,22 @@ import (
 	"time"
 )
 
+type ScoreHandler func(ScoreEvent)
+
 type Poller struct {
 
 	Interval int
 
 	Schedule models.Schedule
-	Games []models.Linescore // in-progress games, updated as they are polled
+	Games []models.Linescore
+
+	onScore ScoreHandler
+
+	announcedFinals map[int]bool
 
 }
 
-
-// Constructor
-
-func NewPoller(interval int) *Poller {
+func NewPoller(interval int, onScore ScoreHandler) *Poller {
 
 	return &Poller{
 
@@ -29,19 +32,20 @@ func NewPoller(interval int) *Poller {
 		Schedule: models.Schedule{},
 		Games: make([]models.Linescore, 0),
 
+		onScore: onScore,
+		announcedFinals: make(map[int]bool),
+
 	}
 
 }
 
 func (p *Poller) Start() {
 
-	p.Poll() // initial poll to populate our data immediately
+	p.Poll()
 
 	ticker := time.NewTicker(time.Duration(p.Interval) * time.Second)
 
 	for range ticker.C {
-
-		// Fires every p.Interval seconds, we will poll the schedule and update our games
 
 		err := p.Poll()
 
@@ -57,9 +61,12 @@ func (p *Poller) Start() {
 
 func (p *Poller) Poll() error {
 
-	// First we must get the schedule for the current day if needed
+	today := time.Now().Format("2006-01-02")
 
-	if len(p.Schedule.Dates) == 0 || p.Schedule.Dates[0].Date != time.Now().Format("2006-01-02") {
+	if len(p.Schedule.Dates) == 0 || p.Schedule.Dates[0].Date != today {
+
+		p.Games = make([]models.Linescore, 0)
+		p.announcedFinals = make(map[int]bool)
 
 		_, err := p.getSchedule()
 
@@ -77,43 +84,75 @@ func (p *Poller) Poll() error {
 
 func (p *Poller) Update() error {
 
-	// For each game in the schedule, if it's in progress, we want to fetch its linescore and update our games slice
-
 	for _, date := range p.Schedule.Dates {
 
 		for _, game := range date.Games {
 
-			if game.Status.DetailedState == "In Progress" {
+			awayName := game.Teams.Away.Team.Name
+			homeName := game.Teams.Home.Team.Name
 
-				linescore, err := p.getLinescore(game.GamePk)
+			switch game.Status.DetailedState {
 
-				if err != nil {
+				case "In Progress":
 
-					fmt.Printf("Error fetching linescore for game %d: %v\n", game.GamePk, err)
+					linescore, err := p.getLinescore(game.GamePk)
 
-					continue
+					if err != nil {
 
-				}
+						fmt.Printf("Error fetching linescore for game %d: %v\n", game.GamePk, err)
 
-				if slices.ContainsFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == game.GamePk }) {
+						continue
 
-					// update it
+					}
 
-					index := slices.IndexFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == game.GamePk })
+					prev, tracked := p.findGame(game.GamePk)
 
-					p.Games[index] = linescore
+					if tracked && scoreChanged(prev, linescore) {
 
-					fmt.Printf("Updated game %d in games slice\n", game.GamePk)
+						p.emit(ScoreEvent{
 
-				} else {
+							GamePk: game.GamePk,
+							AwayName: awayName,
+							HomeName: homeName,
+							AwayScore: linescore.Teams.Away.Runs,
+							HomeScore: linescore.Teams.Home.Runs,
+							Inning: formatInning(linescore),
+						})
 
-					// add it
+					}
 
-					p.Games = append(p.Games, linescore)
+					p.upsertGame(linescore)
 
-					fmt.Printf("Added game %d to games slice\n", game.GamePk)
+				case "Final":
 
-				}
+					if p.announcedFinals[game.GamePk] {
+
+						continue
+
+					}
+
+					awayScore := game.Teams.Away.Score
+					homeScore := game.Teams.Home.Score
+
+					if linescore, err := p.getLinescore(game.GamePk); err == nil {
+
+						awayScore = linescore.Teams.Away.Runs
+						homeScore = linescore.Teams.Home.Runs
+
+					}
+
+					p.emit(ScoreEvent{
+
+						GamePk: game.GamePk,
+						AwayName: awayName,
+						HomeName: homeName,
+						AwayScore: awayScore,
+						HomeScore: homeScore,
+						Final: true,
+					})
+
+					p.announcedFinals[game.GamePk] = true
+					p.removeGame(game.GamePk)
 
 			}
 
@@ -127,19 +166,103 @@ func (p *Poller) Update() error {
 
 }
 
-func (p *Poller) Clean() {
+func (p *Poller) emit(event ScoreEvent) {
 
-	// remove games > 24 hrs old
+	if p.onScore == nil {
+
+		return
+
+	}
+
+	p.onScore(event)
+
+}
+
+func scoreChanged(prev, next models.Linescore) bool {
+
+	return prev.Teams.Home.Runs != next.Teams.Home.Runs || prev.Teams.Away.Runs != next.Teams.Away.Runs
+
+}
+
+func formatInning(linescore models.Linescore) string {
+
+	if linescore.InningHalf != "" && linescore.CurrentInningOrdinal != "" {
+
+		half := "Top"
+
+		if !linescore.IsTopInning {
+
+			half = "Bot"
+
+		}
+
+		return fmt.Sprintf("%s %s", half, linescore.CurrentInningOrdinal)
+
+	}
+
+	return linescore.InningState
+
+}
+
+func (p *Poller) findGame(gamePk int) (models.Linescore, bool) {
+
+	index := slices.IndexFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == gamePk })
+
+	if index < 0 {
+
+		return models.Linescore{}, false
+
+	}
+
+	return p.Games[index], true
+
+}
+
+func (p *Poller) upsertGame(linescore models.Linescore) {
+
+	if slices.ContainsFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == linescore.GamePk }) {
+
+		index := slices.IndexFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == linescore.GamePk })
+
+		p.Games[index] = linescore
+
+		fmt.Printf("Updated game %d in games slice\n", linescore.GamePk)
+
+	} else {
+
+		p.Games = append(p.Games, linescore)
+
+		fmt.Printf("Added game %d to games slice\n", linescore.GamePk)
+
+	}
+
+}
+
+func (p *Poller) removeGame(gamePk int) {
+
+	index := slices.IndexFunc(p.Games, func(g models.Linescore) bool { return g.GamePk == gamePk })
+
+	if index < 0 {
+
+		return
+
+	}
+
+	p.Games = append(p.Games[:index], p.Games[index+1:]...)
+
+	fmt.Printf("Removed game %d from games slice\n", gamePk)
+
+}
+
+func (p *Poller) Clean() {
 
 	for i := len(p.Games) - 1; i >= 0; i-- {
 
 		game := p.Games[i]
 
-		if time.Now().Unix() - int64(game.CreatedAt) > 24 * 60 * 60 {
+		if time.Now().Unix()-int64(game.CreatedAt) > 24*60*60 {
 
-			// remove it
-
-			p.Games = append(p.Games[:i], p.Games[i+1:]...) // removes at index i
+			p.Games = append(p.Games[:i], p.Games[i+1:]...)
 
 			fmt.Printf("Removed game %d from games slice (timed out)\n", game.GamePk)
 
@@ -149,17 +272,11 @@ func (p *Poller) Clean() {
 
 }
 
-// Inner utilities for the poller
-
 func (p *Poller) getSchedule() (*models.Schedule, error) {
 
-	day := time.Now().Format("2006-01-02") // MLB API expects date in YYYY-MM-DD format
+	fmt.Printf("Fetching schedule for %s\n", time.Now().Format("2006-01-02"))
 
-	fmt.Printf("Fetching schedule for %s\n", day)
-
-	var schedule models.Schedule
-
-	err := utils.GetAndDecode(fmt.Sprintf("https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=%s", day), &schedule)
+	schedule, err := FetchToday()
 
 	if err != nil {
 
@@ -167,9 +284,9 @@ func (p *Poller) getSchedule() (*models.Schedule, error) {
 
 	}
 
-	p.Schedule = schedule
+	p.Schedule = *schedule
 
-	return &schedule, nil
+	return schedule, nil
 
 }
 
@@ -179,10 +296,10 @@ func (p *Poller) getLinescore(gamePk int) (models.Linescore, error) {
 
 	err := utils.GetAndDecode(fmt.Sprintf("https://statsapi.mlb.com/api/v1/game/%d/linescore", gamePk), &linescore)
 
-	linescore.GamePk = gamePk // API doesn't include this, but we want it for internal tracking
-	linescore.CreatedAt = int(time.Now().Unix()) // also add a timestamp for when we fetched this
+	linescore.GamePk = gamePk
+	linescore.CreatedAt = int(time.Now().Unix())
 
-	fmt.Printf("Fetched linescore for game %d: %d-%d\n", gamePk, linescore.Teams.Home.Runs, linescore.Teams.Away.Runs)
+	fmt.Printf("Fetched linescore for game %d: %d-%d\n", gamePk, linescore.Teams.Away.Runs, linescore.Teams.Home.Runs)
 
 	return linescore, err
 
